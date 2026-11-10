@@ -1,0 +1,160 @@
+name: hosted-runner-probe-matrix
+
+# One-shot, manually dispatched. No secrets, read-only token, no
+# pull_request_target. All sandbox-affecting changes happen on the
+# ephemeral hosted runner only.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: probe (${{ matrix.leg }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { leg: ubuntu-24.04-x64-no-udev, os: ubuntu-24.04, kvm_udev: false }
+          - { leg: ubuntu-24.04-x64-udev, os: ubuntu-24.04, kvm_udev: true }
+          - { leg: ubuntu-24.04-arm, os: ubuntu-24.04-arm, kvm_udev: false }
+          - { leg: macos-15, os: macos-15, kvm_udev: false }
+          - { leg: windows-2025, os: windows-2025, kvm_udev: false }
+    env:
+      OUT: ${{ github.workspace }}/out
+    steps:
+      # PIN-ME: verify this SHA against the v4.2.2 release before first run.
+      - name: Check out probe scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # ---------------- Linux ----------------
+      - name: linux meta
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" meta
+
+      - name: linux userns sysctls
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" sysctl
+
+      - name: linux bwrap installed
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" bwrap-install
+
+      - name: linux bwrap --unshare-user (before changes)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" bwrap-test before
+
+      - name: linux sysctl restriction off
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" sysctl-off
+
+      - name: linux bwrap --unshare-user (after sysctl=0)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" bwrap-test after-sysctl
+
+      - name: linux sysctl restriction restore
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" sysctl-restore
+
+      - name: linux AppArmor profile for bwrap
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" profile
+
+      - name: linux bwrap --unshare-user (after profile)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" bwrap-test after-profile
+
+      - name: linux Landlock ABI
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: python3 probe/landlock.py "$OUT"
+
+      - name: linux KVM udev enable step
+        if: runner.os == 'Linux' && matrix.kvm_udev
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" kvm-udev
+
+      - name: linux /dev/kvm
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" kvm "${{ matrix.kvm_udev && 'with-udev' || 'without-udev' }}"
+
+      - name: linux docker info
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: bash probe/linux.sh "$OUT" docker
+
+      # ---------------- macOS ----------------
+      - name: macos meta
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: bash probe/macos.sh "$OUT" meta
+
+      - name: macos Seatbelt enforcement
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: bash probe/macos.sh "$OUT" seatbelt
+
+      - name: macos docker info
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: bash probe/macos.sh "$OUT" docker
+
+      # ---------------- Windows ----------------
+      - name: windows meta
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: ./probe/windows.ps1 -OutDir $env:OUT -Probe meta
+
+      - name: windows AppContainer creation
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: ./probe/windows.ps1 -OutDir $env:OUT -Probe appcontainer
+
+      - name: windows job-object nesting
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: ./probe/windows.ps1 -OutDir $env:OUT -Probe jobnesting
+
+      - name: windows docker info (isolation, containers mode)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: ./probe/windows.ps1 -OutDir $env:OUT -Probe docker
+
+      # ---------------- Merge and upload ----------------
+      - name: merge JSON (Linux, macOS)
+        if: always() && runner.os != 'Windows'
+        run: python3 probe/merge.py "$OUT" "${{ matrix.leg }}" "probe-${{ matrix.leg }}.json"
+
+      - name: merge JSON (Windows)
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: python probe/merge.py $env:OUT "${{ matrix.leg }}" "probe-${{ matrix.leg }}.json"
+
+      # PIN-ME: verify this SHA against the v4.6.2 release before first run.
+      - name: Upload probe JSON
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: probe-${{ matrix.leg }}
+          path: probe-${{ matrix.leg }}.json
+          if-no-files-found: error
+          retention-days: 14
